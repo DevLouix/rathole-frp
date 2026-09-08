@@ -132,6 +132,13 @@ impl SocketOpts {
             ..SocketOpts::none()  // None means do not change. Keepalive is set by TcpTransport
         }
     }
+
+    pub fn for_forwarded_socket(nodelay: Option<bool>) -> SocketOpts {
+        SocketOpts {
+            nodelay: Some(nodelay.unwrap_or(DEFAULT_NODELAY)),
+            ..SocketOpts::none()
+        }
+    }
 }
 
 impl SocketOpts {

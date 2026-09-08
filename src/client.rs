@@ -226,7 +226,8 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
             if args.service.service_type != ServiceType::Tcp {
                 bail!("Expect TCP traffic. Please check the configuration.")
             }
-            run_data_channel_for_tcp::<T>(conn, &args.service.local_addr).await?;
+            run_data_channel_for_tcp::<T>(conn, &args.service.local_addr, args.service.nodelay)
+                .await?;
         }
         DataChannelCmd::StartForwardUdp => {
             if args.service.service_type != ServiceType::Udp {
@@ -251,11 +252,13 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
 async fn run_data_channel_for_tcp<T: Transport>(
     mut conn: T::Stream,
     local_addr: &str,
+    nodelay: Option<bool>,
 ) -> Result<()> {
     debug!("New data channel starts forwarding");
     let mut local = TcpStream::connect(local_addr)
         .await
         .with_context(|| format!("Failed to connect to {}", local_addr))?;
+    SocketOpts::for_forwarded_socket(nodelay).apply(&local);
     let _ = copy_bidirectional(&mut conn, &mut local).await;
     Ok(())
 }

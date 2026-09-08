@@ -443,6 +443,7 @@ where
 
         let shutdown_rx_clone = shutdown_tx.subscribe();
         let bind_addr = service.bind_addr.clone();
+        let nodelay = service.nodelay;
         let proxy_protocol = service.proxy_protocol.clone().unwrap_or_default();
         if proxy_protocol == "v1" || proxy_protocol == "v2" {
             info!("Proxy protocol {:?} is enabled", proxy_protocol);
@@ -460,6 +461,7 @@ where
                         data_ch_rx,
                         data_ch_req_tx,
                         shutdown_rx_clone,
+                        nodelay,
                     )
                     .await
                     .with_context(|| "Failed to run TCP connection pool")
@@ -618,6 +620,7 @@ fn tcp_listen_and_send(
     addr: String,
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     mut shutdown_rx: broadcast::Receiver<bool>,
+    nodelay: Option<bool>,
 ) -> mpsc::Receiver<TcpStream> {
     let (tx, rx) = mpsc::channel(CHAN_SIZE);
 
@@ -638,6 +641,8 @@ fn tcp_listen_and_send(
         };
 
         info!("Listening at {}", &addr);
+
+        let socket_opts = SocketOpts::for_forwarded_socket(nodelay);
 
         // Retry at least every 1s
         let mut backoff = ExponentialBackoff {
@@ -672,6 +677,8 @@ fn tcp_listen_and_send(
                             }
 
                             backoff.reset();
+
+                            socket_opts.apply(&incoming);
 
                             debug!("New visitor from {}", addr);
 
@@ -789,8 +796,10 @@ async fn run_tcp_connection_pool<T: Transport>(
     mut data_ch_rx: mpsc::Receiver<T::Stream>,
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     shutdown_rx: broadcast::Receiver<bool>,
+    nodelay: Option<bool>,
 ) -> Result<()> {
-    let mut visitor_rx = tcp_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx);
+    let mut visitor_rx =
+        tcp_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx, nodelay);
     let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
 
     'pool: while let Some(mut visitor) = visitor_rx.recv().await {
