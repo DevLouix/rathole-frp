@@ -2,11 +2,11 @@
 
 ![rathole-logo](./docs/img/rathole-logo.png)
 
-[![GitHub stars](https://img.shields.io/github/stars/rapiz1/rathole)](https://github.com/rapiz1/rathole/stargazers)
-[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/rapiz1/rathole)](https://github.com/rapiz1/rathole/releases)
-![GitHub Workflow Status (branch)](https://img.shields.io/github/actions/workflow/status/rapiz1/rathole/rust.yml?branch=main)
-[![GitHub all releases](https://img.shields.io/github/downloads/rapiz1/rathole/total)](https://github.com/rapiz1/rathole/releases)
-[![Docker Pulls](https://img.shields.io/docker/pulls/rapiz1/rathole)](https://hub.docker.com/r/rapiz1/rathole)
+[![GitHub stars](https://img.shields.io/github/stars/rathole-org/rathole)](https://github.com/rathole-org/rathole/stargazers)
+[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/rathole-org/rathole)](https://github.com/rathole-org/rathole/releases)
+![GitHub Workflow Status (branch)](https://img.shields.io/github/actions/workflow/status/rathole-org/rathole/rust.yml?branch=main)
+[![GitHub all releases](https://img.shields.io/github/downloads/rathole-org/rathole/total)](https://github.com/rathole-org/rathole/releases)
+[![Container image](https://img.shields.io/badge/container-ghcr.io-blue)](https://github.com/orgs/rathole-org/packages/container/package/rathole)
 [![Join the chat at https://gitter.im/rapiz1/rathole](https://badges.gitter.im/rapiz1/rathole.svg)](https://gitter.im/rapiz1/rathole?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 [English](README.md) | [简体中文](README-zh.md)
@@ -37,7 +37,7 @@ rathole, like [frp](https://github.com/fatedier/frp) and [ngrok](https://github.
 
 ## Quickstart
 
-A full-powered `rathole` can be obtained from the [release](https://github.com/rapiz1/rathole/releases) page. Or [build from source](docs/build-guide.md) **for other platforms and minimizing the binary**. A [Docker image](https://hub.docker.com/r/rapiz1/rathole) is also available.
+Release archives ending in `-embedded` use a smaller feature set and omit TLS and WebSocket transports. Other binaries on the [release](https://github.com/rathole-org/rathole/releases) page are full-featured. You can also [build from source](docs/build-guide.md) **for other platforms or to minimize the binary**. A [container image](https://github.com/orgs/rathole-org/packages/container/package/rathole) is available from GHCR.
 
 The usage of `rathole` is very similar to frp. If you have experience with the latter, then the configuration is very easy for you. The only difference is that configuration of a service is split into the client side and the server side, and a token is mandatory.
 
@@ -118,6 +118,7 @@ proxy = "socks5://user:passwd@127.0.0.1:1080" # Optional. The proxy used to conn
 nodelay = true # Optional. Determine whether to enable TCP_NODELAY, if applicable, to improve the latency but decrease the bandwidth. Default: true
 keepalive_secs = 20 # Optional. Specify `tcp_keepalive_time` in `tcp(7)`, if applicable. Default: 20 seconds
 keepalive_interval = 8 # Optional. Specify `tcp_keepalive_intvl` in `tcp(7)`, if applicable. Default: 8 seconds
+fast_open = false # Optional. Enable TCP Fast Open (`TCP_FASTOPEN`). Linux only; setting this to `true` on other platforms is a configuration error. Default: false
 
 [client.transport.tls] # Necessary if `type` is "tls"
 trusted_root = "ca.pem" # Necessary. The certificate of CA that signed the server's certificate
@@ -132,7 +133,7 @@ remote_public_key = "key_encoded_in_base64" # Optional
 tls = true # If `true` then it will use settings in `client.transport.tls`
 
 [client.services.service1] # A service that needs forwarding. The name `service1` can change arbitrarily, as long as identical to the name in the server's configuration
-type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp"]. Default: "tcp"
+type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp", "socket_stream"]. Default: "tcp"
 token = "whatever" # Necessary if `client.default_token` not set
 local_addr = "127.0.0.1:1081" # Necessary. The address of the service that needs to be forwarded
 nodelay = true # Optional. Override the `client.transport.nodelay` per service
@@ -171,10 +172,14 @@ type = "tcp" # Optional. Same as the client `[client.services.X.type]
 token = "whatever" # Necessary if `server.default_token` not set
 bind_addr = "0.0.0.0:8081" # Necessary. The address of the service is exposed at. Generally only the port needs to be change.
 nodelay = true # Optional. Same as the client
+proxy_protocol = "v2" # Optional. Prepend HAProxy PROXY protocol header to each incoming TCP connection before forwarding to the client. Possible values: ["v1", "v2"]. Default: disabled (unset). Only applies to TCP services.
 
 [server.services.service2]
 bind_addr = "0.0.0.1:8082"
 ```
+
+### `socket_stream` service type
+`socket_stream` is a service type that is designed for forwarding unix domain sockets. It is only supported on Unix-like systems (Linux, macOS, etc.). The `local_addr` and `bind_addr` of a `socket_stream` service must be a valid path of a unix domain socket, like `/var/run/socket.sock`.
 
 ### Logging
 

@@ -1,9 +1,11 @@
+#[cfg(target_os = "linux")]
+use crate::helper::{tcp_bind_fast_open, to_socket_addr};
 use crate::{
     config::{TcpConfig, TransportConfig},
     helper::tcp_connect_with_proxy,
 };
 
-use super::{AddrMaybeCached, SocketOpts, Transport};
+use super::{AddrMaybeCached, SocketOpts, Transport, TransportRole};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::net::SocketAddr;
@@ -21,7 +23,7 @@ impl Transport for TcpTransport {
     type Stream = TcpStream;
     type RawStream = TcpStream;
 
-    fn new(config: &TransportConfig) -> Result<Self> {
+    fn new(config: &TransportConfig, _role: TransportRole) -> Result<Self> {
         Ok(TcpTransport {
             socket_opts: SocketOpts::from_cfg(&config.tcp),
             cfg: config.tcp.clone(),
@@ -33,6 +35,11 @@ impl Transport for TcpTransport {
     }
 
     async fn bind<T: ToSocketAddrs + Send + Sync>(&self, addr: T) -> Result<Self::Acceptor> {
+        #[cfg(target_os = "linux")]
+        if self.cfg.fast_open {
+            let socket_addr = to_socket_addr(addr).await?;
+            return tcp_bind_fast_open(socket_addr).await;
+        }
         Ok(TcpListener::bind(addr).await?)
     }
 
@@ -47,7 +54,7 @@ impl Transport for TcpTransport {
     }
 
     async fn connect(&self, addr: &AddrMaybeCached) -> Result<Self::Stream> {
-        let s = tcp_connect_with_proxy(addr, self.cfg.proxy.as_ref()).await?;
+        let s = tcp_connect_with_proxy(addr, self.cfg.proxy.as_ref(), self.cfg.fast_open).await?;
         self.socket_opts.apply(&s);
         Ok(s)
     }

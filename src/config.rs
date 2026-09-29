@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::de::IntoDeserializer;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
@@ -7,7 +8,9 @@ use std::path::Path;
 use tokio::fs;
 use url::Url;
 
-use crate::transport::{DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_KEEPALIVE_SECS, DEFAULT_NODELAY};
+use crate::transport::{
+    DEFAULT_FAST_OPEN, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_KEEPALIVE_SECS, DEFAULT_NODELAY,
+};
 
 /// Application-layer heartbeat interval in secs
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -79,13 +82,51 @@ impl ClientServiceConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServiceType {
     #[serde(rename = "tcp")]
     #[default]
     Tcp,
     #[serde(rename = "udp")]
     Udp,
+    #[cfg(unix)]
+    #[serde(rename = "socket_stream")]
+    SocketStream,
+}
+
+impl<'de> Deserialize<'de> for ServiceType {
+    // Custom deserialization to provide better error messages and handle platform-specific variants
+    // this is necessary because the `socket_stream` variant is only supported on Unix-like systems
+    // and we want to provide a clear error message if someone tries to use it on an unsupported platform
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "tcp" => Ok(ServiceType::Tcp),
+            "udp" => Ok(ServiceType::Udp),
+            "socket_stream" => {
+                #[cfg(unix)]
+                {
+                    Ok(ServiceType::SocketStream)
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(serde::de::Error::custom(
+                        "The `socket_stream` service type is only supported on Unix-like systems",
+                    ))
+                }
+            }
+            _ => Err(serde::de::Error::unknown_variant(
+                &s,
+                #[cfg(unix)]
+                &["tcp", "udp", "socket_stream"],
+                #[cfg(not(unix))]
+                &["tcp", "udp"],
+            )),
+        }
+    }
 }
 
 fn default_service_type() -> ServiceType {
@@ -104,6 +145,7 @@ pub struct ServerServiceConfig {
     pub bind_addr: String,
     pub token: Option<MaskedString>,
     pub nodelay: Option<bool>,
+    pub proxy_protocol: Option<String>,
 }
 
 impl ServerServiceConfig {
@@ -155,6 +197,10 @@ fn default_keepalive_interval() -> u64 {
     DEFAULT_KEEPALIVE_INTERVAL
 }
 
+fn default_fast_open() -> bool {
+    DEFAULT_FAST_OPEN
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TcpConfig {
@@ -164,6 +210,8 @@ pub struct TcpConfig {
     pub keepalive_secs: u64,
     #[serde(default = "default_keepalive_interval")]
     pub keepalive_interval: u64,
+    #[serde(default = "default_fast_open")]
+    pub fast_open: bool,
     pub proxy: Option<Url>,
 }
 
@@ -173,6 +221,7 @@ impl Default for TcpConfig {
             nodelay: default_nodelay(),
             keepalive_secs: default_keepalive_secs(),
             keepalive_interval: default_keepalive_interval(),
+            fast_open: default_fast_open(),
             proxy: None,
         }
     }
@@ -302,28 +351,48 @@ impl Config {
                 "http" => Ok(()),
                 _ => Err(anyhow!(format!("Unknown proxy scheme: {}", u.scheme()))),
             })?;
+
+        #[cfg(not(target_os = "linux"))]
+        if config.tcp.fast_open {
+            return Err(anyhow!("`tcp.fast_open` is only supported on Linux"));
+        }
+
         match config.transport_type {
             TransportType::Tcp => Ok(()),
-            TransportType::Tls => {
-                let tls_config = config
-                    .tls
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Missing TLS configuration"))?;
-                if is_server {
-                    tls_config
-                        .pkcs12
-                        .as_ref()
-                        .and(tls_config.pkcs12_password.as_ref())
-                        .ok_or_else(|| anyhow!("Missing `pkcs12` or `pkcs12_password`"))?;
-                }
-                Ok(())
-            }
+            TransportType::Tls => Config::validate_tls_config(config, is_server),
             TransportType::Noise => {
                 // The check is done in transport
                 Ok(())
             }
-            TransportType::Websocket => Ok(()),
+            TransportType::Websocket => {
+                let websocket_config = config
+                    .websocket
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Missing WebSocket configuration"))?;
+                if websocket_config.tls {
+                    Config::validate_tls_config(config, is_server)?;
+                }
+                Ok(())
+            }
         }
+    }
+
+    fn validate_tls_config(config: &TransportConfig, is_server: bool) -> Result<()> {
+        let tls_config = config
+            .tls
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing TLS configuration"))?;
+        if is_server {
+            tls_config
+                .pkcs12
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing `tls.pkcs12`"))?;
+            tls_config
+                .pkcs12_password
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing `tls.pkcs12_password`"))?;
+        }
+        Ok(())
     }
 
     pub async fn from_file(path: &Path) -> Result<Config> {
@@ -392,6 +461,50 @@ mod tests {
             assert!(Config::from_str(&s).is_err());
         }
         Ok(())
+    }
+
+    fn websocket_transport(tls: bool, tls_config: Option<TlsConfig>) -> TransportConfig {
+        TransportConfig {
+            transport_type: TransportType::Websocket,
+            tls: tls_config,
+            websocket: Some(WebsocketConfig { tls }),
+            ..Default::default()
+        }
+    }
+
+    fn server_tls_config(pkcs12: Option<&str>, pkcs12_password: Option<&str>) -> TlsConfig {
+        TlsConfig {
+            hostname: None,
+            trusted_root: None,
+            pkcs12: pkcs12.map(str::to_owned),
+            pkcs12_password: pkcs12_password.map(MaskedString::from),
+        }
+    }
+
+    #[test]
+    fn secure_websocket_requires_role_appropriate_tls_config() {
+        let missing_tls = websocket_transport(true, None);
+        assert!(Config::validate_transport_config(&missing_tls, false).is_err());
+        assert!(Config::validate_transport_config(&missing_tls, true).is_err());
+
+        let missing_identity =
+            websocket_transport(true, Some(server_tls_config(None, Some("password"))));
+        let error = Config::validate_transport_config(&missing_identity, true)
+            .expect_err("secure WebSocket server must have an identity");
+        assert!(error.to_string().contains("tls.pkcs12"));
+
+        let missing_password =
+            websocket_transport(true, Some(server_tls_config(Some("identity.p12"), None)));
+        let error = Config::validate_transport_config(&missing_password, true)
+            .expect_err("secure WebSocket server must have an identity password");
+        assert!(error.to_string().contains("tls.pkcs12_password"));
+
+        let client_system_roots = websocket_transport(true, Some(server_tls_config(None, None)));
+        assert!(Config::validate_transport_config(&client_system_roots, false).is_ok());
+
+        let insecure = websocket_transport(false, None);
+        assert!(Config::validate_transport_config(&insecure, false).is_ok());
+        assert!(Config::validate_transport_config(&insecure, true).is_ok());
     }
 
     #[test]
